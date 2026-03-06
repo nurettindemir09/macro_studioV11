@@ -26,7 +26,11 @@ HOTKEY_OPTIONS = (
     ["Tab", "CapsLock", "Space", "Enter", "Shift", "Ctrl", "Alt", "Esc"]
 )
 
-PROFILES_FILE = "profiles.json"
+# Robust profile path for Windows AppData - Ensures persistence even if installed in Program Files
+# We use APPDATA because Program Files is read-only for standard applications.
+appdata_dir = os.path.join(os.getenv('APPDATA', os.path.expanduser('~')), "NDemirMacroStudio")
+os.makedirs(appdata_dir, exist_ok=True)
+PROFILES_FILE = os.path.join(appdata_dir, "profiles.json")
 
 class EventRow(ctk.CTkFrame):
     def __init__(self, master, event_id, event_type, value, delay_ms, hold_ms=0, repeat=1, on_delete=None, on_move=None, on_clone=None, **kwargs):
@@ -93,16 +97,28 @@ class EventRow(ctk.CTkFrame):
     def get_data(self):
         try:
             val_str = self.val_var.get()
-            delay_sec = float(self.delay_var.get()) / 1000.0
-            hold_sec = float(self.hold_var.get()) / 1000.0
-            repeat_count = int(self.repeat_var.get())
+            
+            # Robust float conversion
+            def to_float(v, default=0.0):
+                try: return float(v)
+                except: return default
+                
+            delay_sec = to_float(self.delay_var.get(), 300.0) / 1000.0
+            hold_sec = to_float(self.hold_var.get(), 0.0) / 1000.0
+            
+            try: repeat_count = int(self.repeat_var.get())
+            except: repeat_count = 1
             if repeat_count < 1: repeat_count = 1
             
             common = {"type": self.event_type, "delay": delay_sec, "repeat": repeat_count}
             
             if "click" in self.event_type:
-                parts = val_str.replace('(', '').replace(')', '').split(',')
-                return {**common, "x": int(parts[0]), "y": int(parts[1])}
+                # Handle spaces or parenthesis in coordinates
+                clean_val = val_str.replace('(', '').replace(')', '').replace(' ', '')
+                if ',' in clean_val:
+                    parts = clean_val.split(',')
+                    return {**common, "x": int(parts[0]), "y": int(parts[1])}
+                return None # Skip invalid clicks
             
             if self.event_type == "key_hold":
                 return {**common, "key": val_str, "hold": hold_sec}
@@ -114,8 +130,8 @@ class MacroAppGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Antigravity Macro Studio v11 - Repeat Edition")
-        self.geometry("1300x950")
+        self.title("NDemir Macro Studio Pro v11")
+        self.geometry("1300x750")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -126,7 +142,7 @@ class MacroAppGUI(ctk.CTk):
         self.playing = False
         self.playback_lock = threading.Lock()
         self.event_rows = []
-        self.last_event_time = 0
+        self.last_event_time = time.time() # Start with float
         self.pressed_keys_start = {}
         
         # Hotkeys
@@ -134,7 +150,23 @@ class MacroAppGUI(ctk.CTk):
         self.capture_key = Key.f11
         self.hotkey_registry = {}
         
-        self.profiles = self.load_profiles_file()
+        if os.path.exists(PROFILES_FILE):
+            self.profiles = self.load_profiles_file()
+        else:
+            self.profiles = {}
+        
+        # Set Application Icon
+        # Look in EXE folder first, then script folder
+        if getattr(sys, 'frozen', False):
+            base_p = os.path.dirname(sys.executable)
+        else:
+            base_p = os.path.dirname(os.path.abspath(__file__))
+            
+        ico_path = os.path.join(base_p, "macro.ico")
+        if os.path.exists(ico_path):
+            try: self.after(200, lambda: self.iconbitmap(ico_path))
+            except: pass
+
         self.rebuild_hotkey_registry()
 
         # UI Layout
@@ -157,12 +189,14 @@ class MacroAppGUI(ctk.CTk):
         self.btn_save_profile.pack(pady=5, padx=10, fill="x")
         self.refresh_profile_list()
 
-        # --- MIDDLE: BUILDER ---
-        self.builder_panel = ctk.CTkFrame(self, width=260)
-        self.builder_panel.grid(row=0, column=1, sticky="nsew", padx=5, pady=10)
-        ctk.CTkLabel(self.builder_panel, text="STEP BUILDER", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=15)
+        # --- MIDDLE: BUILDER (Now Scrollable) ---
+        self.builder_scroll = ctk.CTkScrollableFrame(self, width=280, label_text="STEP BUILDER")
+        self.builder_scroll.grid(row=0, column=1, sticky="nsew", padx=5, pady=10)
+        self.builder_panel = self.builder_scroll # Alias for compatibility
+        
         self.mouse_pos_label = ctk.CTkLabel(self.builder_panel, text="MOUSE: (0, 0)", font=ctk.CTkFont(size=12, family="Courier"))
         self.mouse_pos_label.pack(pady=5)
+        # ... rest of pack items stay the same as they are on self.builder_panel
         ctk.CTkLabel(self.builder_panel, text="--- Click Actions ---", font=ctk.CTkFont(size=10)).pack(pady=2)
         ctk.CTkButton(self.builder_panel, text="Left Click (F11)", command=lambda: self.add_manual_click("click")).pack(pady=3, padx=10, fill="x")
         ctk.CTkButton(self.builder_panel, text="Right Click", command=lambda: self.add_manual_click("right_click"), fg_color="#8E44AD").pack(pady=3, padx=10, fill="x")
@@ -233,13 +267,24 @@ class MacroAppGUI(ctk.CTk):
     def load_profiles_file(self):
         if os.path.exists(PROFILES_FILE):
             try:
-                with open(PROFILES_FILE, 'r') as f: return json.load(f)
-            except: return {}
+                with open(PROFILES_FILE, 'r', encoding='utf-8') as f: 
+                    return json.load(f)
+            except: 
+                return {}
+        # Try to create empty file if not exists
+        try:
+            with open(PROFILES_FILE, 'w', encoding='utf-8') as f:
+                json.dump({}, f)
+        except: pass
         return {}
 
     def save_profiles_file(self):
-        with open(PROFILES_FILE, 'w') as f: json.dump(self.profiles, f, indent=4)
-        self.rebuild_hotkey_registry()
+        try:
+            with open(PROFILES_FILE, 'w', encoding='utf-8') as f: 
+                json.dump(self.profiles, f, indent=4, ensure_ascii=False)
+            self.rebuild_hotkey_registry()
+        except Exception as e:
+            self.label_status.configure(text=f"[ SAVE FAILED: {str(e)[:20]} ]", text_color="#E74C3C")
 
     def refresh_profile_list(self):
         for w in self.profile_list_frame.winfo_children(): w.destroy()
@@ -251,12 +296,19 @@ class MacroAppGUI(ctk.CTk):
 
     def save_current_as_profile(self):
         name = self.profile_name_entry.get().strip()
-        if not name: return
+        if not name:
+            self.label_status.configure(text="[ ERROR: NAME REQUIRED! ]", text_color="#E74C3C")
+            return
+            
         steps = [r.get_data() for r in self.event_rows if r.get_data()]
-        if not steps: return
+        if not steps:
+            self.label_status.configure(text="[ ERROR: NO VALID STEPS! ]", text_color="#E74C3C")
+            return
+            
         self.profiles[name] = {"hotkey": self.hk_menu.get(), "steps": steps}
         self.save_profiles_file()
         self.refresh_profile_list()
+        self.label_status.configure(text=f"[ PROFILE '{name}' SAVED! ]", text_color="#27AE60")
 
     def load_profile(self, name):
         if name not in self.profiles: return
@@ -273,6 +325,7 @@ class MacroAppGUI(ctk.CTk):
                 self.add_step(stype, val, int(s.get("delay", 0.5) * 1000), int(s.get("hold", 0) * 1000), s.get("repeat", 1))
             else: # Compatibility for old lists
                 self.add_step(s[0], s[1], int(s[2] * 1000), int(s[3] * 1000) if len(s) > 3 else 0)
+        self.label_status.configure(text=f"[ PROFILE '{name}' LOADED ]", text_color="#3498DB")
 
     def delete_profile(self, name):
         if name in self.profiles:
@@ -297,15 +350,30 @@ class MacroAppGUI(ctk.CTk):
         threading.Thread(target=_track, daemon=True).start()
 
     def on_global_press(self, key):
-        if key == self.rec_key: self.toggle_recording()
-        elif key == self.capture_key: self.add_manual_click("click")
+        # 1. Management Hotkeys (Highest Priority)
+        if key == self.rec_key: 
+            self.toggle_recording()
+            return
+        elif key == self.capture_key: 
+            self.add_manual_click("click")
+            return
+            
+        # 2. Multi-Macro Registry (Trigger any saved macro)
         elif key in self.hotkey_registry and not self.playing and not self.recording:
             threading.Thread(target=self.playback, args=(self.hotkey_registry[key],), daemon=True).start()
-        if self.recording and key not in self.pressed_keys_start:
-            self.pressed_keys_start[key] = time.time()
+            return
+
+        # 3. Track start time for recording holds
+        if self.recording:
+            if key not in self.pressed_keys_start:
+                self.pressed_keys_start[key] = time.time()
 
     def on_global_release(self, key):
         if self.recording and key in self.pressed_keys_start:
+            if key in [self.rec_key, self.capture_key]: 
+                self.pressed_keys_start.pop(key, None)
+                return
+                
             press_time = self.pressed_keys_start.pop(key)
             duration = int((time.time() - press_time) * 1000)
             delay = int((press_time - self.last_event_time) * 1000)

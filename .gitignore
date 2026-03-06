@@ -5,3 +5,9 @@ profiles.json
 *.pyc
 .vscode/
 .idea/
+build/
+dist/
+setup/
+*.spec
+macro_icon.png
+macro.ico
